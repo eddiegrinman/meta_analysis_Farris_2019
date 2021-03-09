@@ -1,0 +1,203 @@
+---
+title: "Farris_2019_meta_analysis"
+author: "Eddie Grinman"
+date: "2/13/2021"
+output:
+html_document: default
+
+---
+
+# Fastq files were downloaded from NCBI GEO (GSE116342) onto HPC and aligned to mus musculus transcriptome using Salmon
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages and set seed
+
+```{r message = FALSE, warning=FALSE}
+library(biomaRt)
+library(grid)
+library(ggplot2)
+library(ggrepel)
+library(ggdendro)
+library(dplyr)
+library(reshape2)
+require(stats)
+library(tximport)
+library(tidyverse)
+library(tidyr)
+set.seed(33)
+```
+
+## Set working directory and directory of Salmon Files, Read in the Ensembl transcript IDs and gene names
+```{r}
+setwd('/Users/eddiegrinman/Desktop/RNAseq_Workflows')
+mousegenefilters <- read.csv('Ensembl_Transcripts_Genes_2021.csv')
+tx2gene <-mousegenefilters[,c(3,2)]
+dir = '/Users/eddiegrinman/Desktop/RNAseq_Workflows/salmon'
+```
+
+## Read in the sample information
+
+```{r}
+samples <- read.csv("Farris_sample_file.csv")
+files <- file.path(dir,samples$SRA, "quant.sf") #Matches to the sample name
+names(files) <- samples$Group #Matches to the sample label (treatment group)
+txi <- tximport(files, type="salmon", tx2gene=tx2gene) #Imports the salmon files into one file and combines transcripts into gene names
+counts <- as.data.frame(txi$counts)
+TPM <- as.data.frame(txi$abundance)
+```
+
+## Examine the data
+# RNAseq data consists of 3 biological replicates each from cell body and dendrites from 4 different hippocampal sub-regions
+
+```{r}
+head(counts)
+```
+## Combine the counts from the 4 sub regions (CA1, CA2, CA3, and DG) for each sample (separate for cell body and dendrite)
+# The result is N = 3 cell body and N = 3 dendrite
+
+```{r}
+Hipp_CB1 <- apply(counts[ ,c(1,3,5,7)], 1, sum)
+Hipp_DE1 <- apply(counts[ ,c(2,4,6,8)], 1, sum)
+Hipp_CB2 <- apply(counts[ ,c(9,11,13,15)], 1, sum)
+Hipp_DE2 <- apply(counts[ ,c(10,12,14,16)], 1, sum)
+Hipp_CB3 <- apply(counts[ ,c(17,19,21,23)], 1, sum)
+Hipp_DE3 <- apply(counts[ ,c(18,20,22,24)], 1, sum)
+
+counts_combined <- cbind(Hipp_CB1,Hipp_DE1,Hipp_CB2,Hipp_DE2,Hipp_CB3,Hipp_DE3)
+counts_combined <- counts_combined[ , order(colnames(counts_combined))]
+```
+
+## Combine the TPM from the 4 sub regions (CA1, CA2, CA3, and DG) for each sample (separate for cell body and dendrite)
+# The result is N = 3 cell body and N = 3 dendrite
+
+```{r}
+TPM_CB1 <- apply(TPM[ ,c(1,3,5,7)], 1, sum)
+TPM_DE1 <- apply(TPM[ ,c(2,4,6,8)], 1, sum)
+TPM_CB2 <- apply(TPM[ ,c(9,11,13,15)], 1, sum)
+TPM_DE2 <- apply(TPM[ ,c(10,12,14,16)], 1, sum)
+TPM_CB3 <- apply(TPM[ ,c(17,19,21,23)], 1, sum)
+TPM_DE3 <- apply(TPM[ ,c(18,20,22,24)], 1, sum)
+
+TPM_combined <- cbind(TPM_CB1,TPM_DE1,TPM_CB2,TPM_DE2,TPM_CB3,TPM_DE3)
+TPM_combined <- TPM_combined[ , order(colnames(TPM_combined))]
+
+TPM_average <- as.data.frame(apply(TPM_combined,1,mean)) # Get the average TPM value per gene
+TPM_average$Gene <- rownames(TPM_average)
+
+#write.csv(counts, 'counts.csv')
+#write.csv(TPM, 'TPM.csv')
+```
+
+
+## Euclidiean Distance Heatmap of TPM values
+
+```{r}
+library(pheatmap)
+dd <- dist(scale(t(TPM_combined)),method = 'euclidean')
+m <- as.matrix(dd)
+pheatmap(m,  main = 'Euclidean Distances Heatmap')
+```
+
+## Principal Component Analysis
+
+```{r, fig.width=9,fig.height=6, warning=FALSE, message=FALSE}
+library(factoextra)
+PCA <- prcomp(t(TPM_combined))
+fviz_pca_ind(PCA)
+```
+
+## Differential Expression Analysis
+
+```{r, message = FALSE, warning=FALSE}
+library(DESeq2)
+inputz <- counts_combined
+inputz<-as.matrix(inputz)
+storage.mode(inputz) = "integer"
+
+colD <- data.frame(row.names=colnames(inputz), condition=c(rep('Cell_Body',3),rep('Dendrite',3)))
+inputz[is.na(inputz)] <- 0
+dds <- DESeqDataSetFromMatrix(countData = inputz, colData = colD, design = ~ condition)
+dds <- DESeq(dds)
+dds <- estimateSizeFactors(dds)
+normcounts <- counts(dds, normalized=TRUE)
+Dendrite_vs_Soma <- as.data.frame(results(dds, contrast = c("condition","Dendrite","Cell_Body")))
+Dendrite_vs_Soma$Gene <- rownames(Dendrite_vs_Soma)
+Dendrite_vs_Soma <- merge(Dendrite_vs_Soma, TPM_average, by = 'Gene')
+
+Enriched_Genes <- Dendrite_vs_Soma %>% filter(padj <0.05 & TPM_average>2)
+
+#write.csv(Dendrite_vs_Soma, "DendritevsSoma_DESEq2.csv")
+#write.csv(Enriched_Genes, "Dendrite_Enriched_RNAs.csv")
+```
+
+# Ensembl gene ID and biotype information
+## Merge gene biotype info with DEseq dataset
+
+```{r, message = FALSE}
+mousegenes <- unique(mousegenefilters[,c(2,4,5)])
+colnames(mousegenes) <- c('Gene','entrez_gene_id','gene_biotype')
+Dendrite_vs_Soma = merge(Dendrite_vs_Soma, mousegenes, by = 'Gene')
+```
+
+## GO Analysis (Dendrite-enriched genes)
+```{r, fig.width=9,fig.height=6, message = FALSE, warning=FALSE}
+library(org.Mm.eg.db)
+library(clusterProfiler)
+goBP <- enrichGO(gene = (Dendrite_vs_Soma %>% filter(padj<0.05 & log2FoldChange>0))$entrez_gene_id, keyType = 'ENTREZID', OrgDb = org.Mm.eg.db, ont = "BP", pAdjustMethod = "fdr", pvalueCutoff = 0.05, readable = TRUE)
+
+goCC <- enrichGO(gene = (Dendrite_vs_Soma %>% filter(padj<0.05 & log2FoldChange>0))$entrez_gene_id, keyType = 'ENTREZID', OrgDb = org.Mm.eg.db, ont = "CC", pAdjustMethod = "fdr", pvalueCutoff = 0.05, readable = TRUE)
+
+goMF <- enrichGO(gene = (Dendrite_vs_Soma %>% filter(padj<0.05 & log2FoldChange>0))$entrez_gene_id, keyType = 'ENTREZID', OrgDb = org.Mm.eg.db, ont = "MF", pAdjustMethod = "fdr", pvalueCutoff = 0.05, readable = TRUE)
+
+barplot(goBP, title = 'Dendrite Enriched Pathways: GO BP')
+barplot(goCC, title = 'Dendrite Enriched Pathways: GO CC')
+barplot(goMF, title = 'Dendrite Enriched Pathways: GO MF')
+
+```
+
+## Volcano plot of Differentially Expressed Genes; labeling the GO:BP-significant Genes enriched in Dendrites
+```{r, fig.width=8,fig.height=8, message = FALSE, warning = FALSE}
+
+target_genes <- goBP@result$geneID[1] # Extract the genes enriched by GO analysis
+target_genes <- unlist(strsplit(target_genes, split = "/"))
+
+Dendrite_vs_Soma$sqrtnlog10padj <- sqrt(-log10(Dendrite_vs_Soma$padj)) # Generate a sqrt -log10 padj value for y-axis
+
+GO_df <- Dendrite_vs_Soma %>% filter(Gene %in% target_genes & sqrtnlog10padj>5) # Filter DEseq dataset by the GO term genes
+
+Dendrite_vs_Soma$significant <- ifelse(Dendrite_vs_Soma$Gene %in% GO_df$Gene,"Blue", "Grey")
+Dendrite_vs_Soma <- Dendrite_vs_Soma[rev(order(as.numeric(factor(Dendrite_vs_Soma$significant)))),]
+
+
+
+g <- ggplot(Dendrite_vs_Soma, aes(x=log2FoldChange,y=sqrtnlog10padj))
+g+ geom_point(color=Dendrite_vs_Soma$significant)+
+  geom_hline(mapping=NULL, yintercept=sqrt(-log10(0.05)),size=0.5,linetype='dotted') +
+  geom_vline(mapping=NULL, xintercept=0,size=0.5, linetype='dotted') +
+  scale_color_manual(values = c("blue","grey"))+
+  theme_bw(base_size = 20) + theme(legend.position = "bottom")+
+  theme_bw(base_size = 20) + theme(legend.position = "bottom")+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_y_continuous(limits = c(0,20),name='Sq Root -log10 padj')+
+  ggtitle('Dendrite vs Cell Body Volcano Plot')+
+  
+  geom_text_repel(data = GO_df,
+    aes(x=log2FoldChange,y=sqrtnlog10padj, label=Gene),  
+    #nudge_x = 2,
+    label.size = 100,
+    box.padding = 0,
+    label.padding = 1,
+    point.padding = 1,
+    force = 1,
+    max.overlaps = getOption("ggrepel.max.overlaps", default = 10),
+  )
+  
+
+```
+
+
+
